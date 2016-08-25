@@ -25,7 +25,7 @@ import Data.HashSet (HashSet)
 import qualified Data.HashSet as Set
 import qualified Data.List as List
 import Data.Maybe (fromJust)
-import Data.Monoid ((<>))
+import Data.Semigroup (Semigroup, (<>))
 import Debug.Trace (trace)
 import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
@@ -77,6 +77,23 @@ type AnonymousAggregationRule g b h = forall pid. AggregationRule pid g b h
 type AnonymousSocialWelfareFunction g b = forall pid. AggregationRule pid g b []
 type AnonymousRankSocialWelfareFunction g = forall pid. AggregationRule pid g () []
 
+type VotingSystem pid cid h = [Identified "voter" pid (UrBallot "candidate" cid)] -> h (HashSet cid)
+
+combine
+  :: forall cid pid g c h
+  . (Eq cid, Hashable cid, Semigroup (h (HashSet cid)), Applicative h, Foldable h)
+  => PollingRule g c
+  -> AggregationRule pid g c h
+  -> HashSet cid
+  -> VotingSystem pid cid h
+combine poll aggregate choices votes
+  | null candidatesWithoutVotes = voteResults
+  | otherwise = voteResults <> pure candidatesWithoutVotes
+    where
+      candidatesWithoutVotes = choices `Set.difference` candidatesWithVotes
+      candidatesWithVotes = Set.fromList $ Foldable.toList voteResults >>= Foldable.toList
+      voteResults = aggregate . fmap (over value poll) $ votes
+
 
 
 pluralityPoll :: RankVote Identity
@@ -95,13 +112,10 @@ toAscOccurList = List.sortOn snd . Map.toList
 plurality
   :: forall cid pid
   . (Eq cid, Hashable cid)
-  => HashSet cid -> [Identified "voter" pid (UrBallot "candidate" cid)] -> [HashSet cid]
-plurality choices votes = voteResults <> if null candidatesWithoutVotes then [] else pure candidatesWithoutVotes
-    where
-      candidatesWithoutVotes = choices `Set.difference` candidatesWithVotes
-      candidatesWithVotes = Set.fromList $ voteResults >>= Foldable.toList
-      voteResults = pluralityAggregate . fmap (over value pluralityPoll) $ votes
-
+  => HashSet cid
+  -> [Identified "voter" pid (UrBallot "candidate" cid)]
+  -> [HashSet cid]
+plurality = combine pluralityPoll pluralityAggregate
 
 
 data Candidate = Alice | Bob | Eve deriving (Bounded, Enum, Eq, Generic, Hashable, Show)
