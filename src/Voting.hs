@@ -15,7 +15,7 @@
 module Voting where
 
 import Control.Lens
-import Control.Monad (filterM)
+import qualified Control.Monad as Monad
 import qualified Data.Foldable as Foldable
 import Data.Function (on)
 import Data.Hashable (Hashable)
@@ -24,15 +24,15 @@ import qualified Data.HashMap.Strict as Map
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as Set
 import qualified Data.List as List
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, fromMaybe)
 import Data.Semigroup (Semigroup, (<>))
 import Debug.Trace (trace)
 import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
-import Test.QuickCheck
+import Test.QuickCheck (Arbitrary(..), Result, vector, quickCheckResult, arbitraryBoundedEnum)
 
 type Ballot f t b a = f (Identified t a b)
-type UrBallot t a = Ballot HashSet t Natural a
+type UrBallot t a = Ballot HashSet t Double a
 
 data Identified t a b
   = I
@@ -56,7 +56,7 @@ newtype CompleteBallot f t b a
   = CompleteBallot
   { unCompleteBallot :: Ballot f t b a
   }
-type CompleteUrBallot t a = CompleteBallot HashSet t Natural a
+type CompleteUrBallot t a = CompleteBallot HashSet t Double a
 deriving instance (Eq (Ballot f t b a)) => Eq (CompleteBallot f t b a)
 deriving instance (Show (Ballot f t b a)) => Show (CompleteBallot f t b a)
 
@@ -121,9 +121,9 @@ plurality = combine pluralityPoll pluralityAggregate
 data Candidate = Alice | Bob | Eve deriving (Bounded, Enum, Eq, Generic, Hashable, Show)
 
 voter1, voter2, voter3 :: Identified "voter" String (UrBallot "candidate" Candidate)
-voter1 = I "voter1" . Set.fromList $ [I Alice 1, I Bob 3, I Eve 4]
-voter2 = I "voter2" . Set.fromList $ [I Alice 1, I Bob 0, I Eve 0]
-voter3 = I "voter3" . Set.fromList $ [I Alice 0, I Bob 0, I Eve 1]
+voter1 = I "voter1" . Set.fromList $ [I Alice 0, I Bob 1, I Eve 4]
+voter2 = I "voter2" . Set.fromList $ [I Alice 0, I Bob 1, I Eve 0]
+voter3 = I "voter3" . Set.fromList $ [I Alice 0, I Bob 1, I Eve 1]
 
 votes :: [Identified "voter" String (UrBallot "candidate" Candidate)]
 votes = [voter1, voter2, voter3]
@@ -131,7 +131,7 @@ votes = [voter1, voter2, voter3]
 
 
 nonEmptyPowerset :: [b] -> [[b]]
-nonEmptyPowerset = filter (not . null) . filterM (const [True, False])
+nonEmptyPowerset = List.filter (not . null) . Monad.filterM (const [True, False])
 
 prop_iia
   :: forall cid pid
@@ -157,6 +157,67 @@ prop_iia system (fmap (over value unCompleteBallot) -> ballots) =
       candidateSets :: [HashSet cid]
       candidateSets = fmap Set.fromList . nonEmptyPowerset $ enumFromTo minBound maxBound
 
+-- TODO: This property sometimes throw spurious failures due to ties. We need to handle ties better generally.
+prop_pareto
+  :: forall cid pid
+  . (Eq cid, Bounded cid, Enum cid, Hashable cid, Show cid)
+  => (HashSet cid -> [Identified "voter" pid (UrBallot "candidate" cid)] -> [HashSet cid])
+  -> [Identified "voter" pid (CompleteUrBallot "candidate" cid)]
+  -> Bool
+prop_pareto system (fmap (over value unCompleteBallot) -> ballots) =
+  all (uncurry outputReflectsInput) candidatePairs
+    where
+      candidatePairs :: [(cid, cid)]
+      candidatePairs = heterogenousPairs $ enumFromTo minBound maxBound
+      outputReflectsInput :: cid -> cid -> Bool
+      outputReflectsInput l r =
+        case (inputPref `implies`) <$> outputPref of
+          Just True -> True
+          Just False -> trace (show l <> show r <> show inputPref <> show outputPref) False
+          Nothing -> error $ "We asked for candidate not in the ballots " <> show l <> " " <> show r
+        where
+          inputPref = fromMaybe False $ allPreferTo l r (view value <$> ballots)
+          outputPref = preferredToInWelfareFunction l r output
+          output = system (Set.fromList [l, r]) ballots
+
+implies :: Bool -> Bool -> Bool
+implies False _ = True
+implies True True = True
+implies True False = False
+
+
+-- TODO: We shouldn't collapse all the failure cases here to `Nothing`.
+-- In particular, failure to find a candidate and an empty list of ballots are quite distinct
+-- from there being no unified preference.
+allPreferTo
+  :: (Traversable t, Eq a, Hashable a)
+  => a -> a -> t (UrBallot "candidate" a) -> Maybe Bool
+allPreferTo l r ballots = do
+  prefs <- traverse (preferredToInUrBallot l r) ballots
+  let
+    -- This a slightly strange contortion that allows us to work with any @Traversable t@, even empty.
+    aggregatePref = Set.fromList . Foldable.toList $ prefs
+  case Set.size aggregatePref `compare` 1 of
+    LT -> Monad.mzero
+    GT -> Monad.mzero
+    EQ -> pure . List.head . Foldable.toList $ aggregatePref
+
+preferredToInUrBallot :: (Eq a, Hashable a) => a -> a -> UrBallot "candidate" a -> Maybe Bool
+preferredToInUrBallot l r ballot =
+  (>=) <$> l `Map.lookup` prefMap <*> r `Map.lookup` prefMap
+    where
+      prefMap = Map.fromList . fmap (\i -> (view identifier i, view value i)) . Foldable.toList $ ballot
+
+heterogenousPairs :: (Eq a) => [a] -> [(a, a)]
+heterogenousPairs = filter (uncurry (/=)) . pairs
+
+pairs :: [a] -> [(a, a)]
+pairs xs = (,) <$> xs <*> xs
+
+preferredToInWelfareFunction :: (Eq a, Hashable a) => a -> a -> [HashSet a] -> Maybe Bool
+preferredToInWelfareFunction l r xs =
+  (<=) <$> List.findIndex (l `Set.member`) xs <*> List.findIndex (r `Set.member`) xs
+
 instance (Arbitrary b, Arbitrary c) => Arbitrary (Identified a b c) where
   arbitrary = I <$> arbitrary <*> arbitrary
 
@@ -178,6 +239,8 @@ instance
 x :: IO Result
 x = quickCheckResult . prop_iia $ plurality @Candidate @String
 
+y :: IO Result
+y = quickCheckResult . prop_pareto $ plurality @Candidate @String
 
 
 
