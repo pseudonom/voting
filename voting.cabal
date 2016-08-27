@@ -21,3 +21,4 @@ library
                      , lens
                      , QuickCheck
                      , unordered-containers
+                     , extra

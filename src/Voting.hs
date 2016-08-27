@@ -14,6 +14,7 @@
 
 module Voting where
 
+import Control.Arrow (second, (&&&))
 import Control.Lens
 import qualified Control.Monad as Monad
 import qualified Data.Foldable as Foldable
@@ -24,9 +25,11 @@ import qualified Data.HashMap.Strict as Map
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as Set
 import qualified Data.List as List
+import qualified Data.List.Extra as List
 import Data.Maybe (fromJust, fromMaybe)
 import Data.Semigroup (Semigroup, (<>))
 import Debug.Trace (trace)
+import GHC.Exts (Down(..))
 import GHC.Generics (Generic)
 import Numeric.Natural (Natural)
 import Test.QuickCheck (Arbitrary(..), Result, vector, quickCheckResult, arbitraryBoundedEnum)
@@ -93,6 +96,31 @@ combine poll aggregate choices votes
       candidatesWithoutVotes = choices `Set.difference` candidatesWithVotes
       candidatesWithVotes = Set.fromList $ Foldable.toList voteResults >>= Foldable.toList
       voteResults = aggregate . fmap (over value poll) $ votes
+
+
+
+bordaPoll :: RankVote []
+bordaPoll = fmap (set value ()) . List.sortOn (Down . view value) . Foldable.toList
+
+bordaAggregate :: AnonymousRankSocialWelfareFunction []
+bordaAggregate =
+  munge . groupAllOn (Down . snd) . Map.toList . Map.fromListWith (+) . bordaScores
+  where
+    bordaScores :: [(Identified "voter" pid [Identified "candidate" cid ()])] -> [(cid, Natural)]
+    bordaScores = (>>= bordaScore . fmap (view identifier) . view value)
+    munge = fmap (Set.fromList . fmap fst)
+
+groupAllOn :: (Ord b) => (a -> b) -> [a] -> [[a]]
+groupAllOn f = List.groupOn f . List.sortOn f
+
+groupAllOn' :: (Hashable b, Eq b) => (a -> b) -> [a] -> [[a]]
+groupAllOn' f = Foldable.toList . Map.fromListWith (<>) . map (f &&& pure)
+
+bordaScore :: [a] -> [(a, Natural)]
+bordaScore as =
+  map (second (l -)) . zip as $ [0..]
+    where
+      l = fromIntegral $ length as
 
 
 
